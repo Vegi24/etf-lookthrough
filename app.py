@@ -37,20 +37,22 @@ ISHARES_HOLDINGS_URLS = {
 COUNTRY_COORDS = {
     "USA": (37.1, -95.7),
     "Vereinigte Staaten": (37.1, -95.7),
+
     "Deutschland": (51.1657, 10.4515),
     "Frankreich": (46.2276, 2.2137),
     "Großbritannien": (55.3781, -3.4360),
     "Vereinigtes Königreich": (55.3781, -3.4360),
+    "Niederlande": (52.1326, 5.2913),
+
     "Österreich": (47.5162, 14.5501),
     "Schweiz": (46.8182, 8.2275),
+    "Schweden": (60.1282, 18.6435),
+    "Italien": (41.8719, 12.5674),
+
     "Japan": (36.2048, 138.2529),
     "Australien": (-25.2744, 133.7751),
     "China": (35.8617, 104.1954),
-    "Italien": (41.8719, 12.5674),
-    "Schweden": (60.1282, 18.6435),
 }
-
-
 # --------------------------------------------------------------------------------------
 # Hilfsfunktionen
 # --------------------------------------------------------------------------------------
@@ -87,7 +89,8 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     Format wie in deiner WITS-Datei:
       - Zeile 0: "Fondsposition per,..." (Meta)
       - Zeile 1: Leerzeile
-      - Ab Zeile 2: CSV mit Header "Emittententicker,Name,...,Gewichtung (%)"
+      - Ab Zeile 2: CSV mit Header
+        "Emittententicker,Name,Sektor,Anlageklasse,Marktwert,Gewichtung (%),...,Standort,..."
     """
     if isin not in ISHARES_HOLDINGS_URLS:
         raise ValueError(f"Keine iShares-Holdings-URL für ISIN {isin} konfiguriert.")
@@ -100,7 +103,7 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     lines = text.splitlines()
 
     # Header-Zeile finden (fängt mit "Emittententicker," oder "Ticker," an)
-    header_idx = None    # type: ignore[assignment]
+    header_idx = None
     for i, line in enumerate(lines):
         if line.startswith("Emittententicker,") or line.startswith("Ticker,"):
             header_idx = i
@@ -112,43 +115,71 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     csv_text = "\n".join(lines[header_idx:])
     df = pd.read_csv(StringIO(csv_text))
 
-    # Spalten identifizieren
-    # Name
-    if "Name" in df.columns:
-        name_col = "Name"
+    # Spaltennamen lowercased für robuste Suche
+    lower_map = {c.lower(): c for c in df.columns}
+
+    # Name-Spalte
+    if "name" in lower_map:
+        name_col = lower_map["name"]
     else:
-        raise ValueError("Spalte 'Name' in iShares-CSV nicht gefunden.")
+        raise ValueError(f"Spalte 'Name' in iShares-CSV nicht gefunden. Spalten: {list(df.columns)}")
 
-    # Gewichtung
-    weight_col = None
+    # Gewichtung-Spalte
     weight_candidates = [
-        "Gewichtung (%)",
-        "Weight (%)",
-        "Weighting (%)",
-        "Gewicht (%)",
-        "Gewicht %",
+        "gewichtung (%)",
+        "gewichtung%",
+        "gewicht (%)",
+        "gewicht",
+        "weight (%)",
+        "weight%",
+        "weight",
     ]
-    for c in weight_candidates:
-        if c in df.columns:
-            weight_col = c
-            break
-
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
     if weight_col is None:
         raise ValueError(
             f"Keine Gewichtsspalte in iShares-CSV gefunden. Spalten: {list(df.columns)}"
         )
 
-    result = df[[name_col, weight_col]].copy()
+    # Länder-Spalte (Standort)
+    country_candidates = [
+        "standort",
+        "land",
+        "country",
+        "issuer country",
+        "domicile",
+    ]
+    country_col = next((lower_map[k] for k in country_candidates if k in lower_map), None)
+
+    cols = [name_col, weight_col]
+    if country_col is not None:
+        cols.append(country_col)
+
+    result = df[cols].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
 
-    # Prozentwerte in [0,1] umrechnen
-    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+    if country_col is not None:
+        result.rename(columns={country_col: "country"}, inplace=True)
+    else:
+        result["country"] = pd.NA
+
+    # Gewichtung (%) -> Anteil [0,1]
+    cleaned = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)   # 220’671 -> 220671
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)  # 19,01 -> 19.01 (falls irgendwo vorkommt)
+        .str.strip()
+    )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+
+    # hier sind es bei iShares wirklich Prozentwerte (z.B. 19.01)
+    result["weight_pct"] = numeric / 100.0
+
     result = result.dropna(subset=["weight_pct"])
 
-    # iShares-Dateien enthalten hier kein Land – country bleibt NaN
-    result["country"] = pd.NA
-
     return result
+
 
 
 def load_invesco_local(isin: str) -> pd.DataFrame:
