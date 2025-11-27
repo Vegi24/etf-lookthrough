@@ -129,6 +129,69 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
 
     return result
 
+def load_invesco_local(isin: str) -> pd.DataFrame:
+    """
+    Liest Invesco-Holdings aus einer lokalen Datei im Ordner data/.
+    Erlaubt:
+      - data/invesco_<ISIN>.xlsx  (Excel)
+      - data/invesco_<ISIN>.csv   (CSV)
+    """
+    xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
+    csv_path = DATA_DIR / f"invesco_{isin}.csv"
+
+    if xlsx_path.exists():
+        try:
+            df = pd.read_excel(xlsx_path)
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Invesco-Excel {xlsx_path}: {e}")
+        source_path = xlsx_path
+    elif csv_path.exists():
+        df = pd.read_csv(csv_path)
+        source_path = csv_path
+    else:
+        raise FileNotFoundError(
+            f"Keine Datei für Invesco-ETF {isin} gefunden. "
+            f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
+        )
+
+    lower_map = {c.lower(): c for c in df.columns}
+
+    name_candidates = [
+        "name", "titel", "security name", "issuer name",
+        "position", "bezeichnung", "holding", "constituent"
+    ]
+    weight_candidates = [
+        "weight (%)", "gewichtung (%)", "gewichtung",
+        "gewicht (%)", "gewicht", "portfolio weight",
+        "portfolio weight (%)", "gewicht in %"
+    ]
+
+    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
+
+    if name_col is None or weight_col is None:
+        raise ValueError(
+            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
+            f"Spalten: {list(df.columns)}"
+        )
+
+    result = df[[name_col, weight_col]].copy()
+    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+
+    result["weight_pct"] = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
+    )
+
+    result = result.dropna(subset=["weight_pct"])
+    return result
+
 
 def load_invesco_local(isin: str) -> pd.DataFrame:
     """
