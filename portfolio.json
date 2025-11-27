@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Invesco CoinShares Global Blockchain UCITS ETF - A USD ACC",
+    "provider": "invesco",
+    "ticker": "BCHN",
+    "isin": "IE00BGBN6P67",
+    "value_eur": 4803.11
+  },
+  {
+    "name": "iShares MSCI World Information Technology Sector UCITS ETF - USD DIS",
+    "provider": "ishares",
+    "ticker": "WITS",
+    "isin": "IE00BJ5JNY98",
+    "value_eur": 4108.26
+  },
+  {
+    "name": "iShares Automation & Robotics UCITS ETF - USD ACC",
+    "provider": "ishares",
+    "ticker": "RBOT",
+    "isin": "IE00BYZK4552",
+    "value_eur": 925.48
+  },
+  {
+    "name": "AMUNDI S&P GLOBAL CONSUMER DISCRETIONARY ESG UCITS ETF DR - EUR ACC",
+    "provider": "amundi",
+    "ticker": null,
+    "isin": "IE000NM0ALX6",
+    "value_eur": 465.26
+  },
+  {
+    "name": "Amundi MSCI Water ESG Screened UCITS ETF - Dist",
+    "provider": "amundi",
+    "ticker": null,
+    "isin": "FR0010527275",
+    "value_eur": 470.07
+  },
+  {
+    "name": "iShares MSCI World Health Care Sector UCITS ETF - USD DIS",
+    "provider": "ishares",
+    "ticker": "WHCS",
+    "isin": "IE00BJ5JNZ06",
+    "value_eur": 462.88
+  }
+]
