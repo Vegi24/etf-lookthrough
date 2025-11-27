@@ -269,4 +269,424 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
             f"Spalten: {list(df.columns)}"
         )
 
-    resu
+    result = df[[name_col, weight_col]].copy()
+    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+
+    # Country-Spalte (falls doch mal vorhanden)
+    country_col = next(
+        (lower_map[k] for k in ["land", "country", "domicile", "issuer country"] if k in lower_map),
+        None,
+    )
+    if country_col is not None:
+        result["country"] = df[country_col]
+    else:
+        result["country"] = pd.NA
+
+    # Text bereinigen -> numerisch
+    cleaned = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)   # 0,05158 -> 0.05158
+        .str.replace("%", "", regex=False)
+        .str.strip()
+    )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+
+    # Heuristik:
+    # - Wenn max > 1.5 -> Prozentangaben (z.B. 5.43 = 5,43 % -> /100)
+    # - Wenn max <= 1.5 -> bereits normierte Anteile (z.B. 0.0515)
+    max_val = numeric.max(skipna=True)
+    if pd.notna(max_val) and max_val > 1.5:
+        numeric = numeric / 100.0
+
+    result["weight_pct"] = numeric
+    result = result.dropna(subset=["weight_pct"])
+
+    return result
+
+
+def load_amundi_local(isin: str) -> pd.DataFrame:
+    """
+    Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
+
+    Erlaubt:
+      - data/amundi_<ISIN>.xlsx  (Excel)
+      - data/amundi_<ISIN>.csv   (CSV)
+
+    Unterstützt sowohl alte Prozent-Formate (z.B. "5,43" oder "5.43 %")
+    als auch das neue Format mit Anteilen (z.B. "0,054629263").
+
+    Beispiel:
+      ISIN;Name;Anlageklasse;Währung;Gewichtung;Sektor;Land
+      US92338C1036;VERALTO CORP;EQUITY;USD;0,054629263;Industrie;USA
+    """
+    xlsx_path = DATA_DIR / f"amundi_{isin}.xlsx"
+    csv_path = DATA_DIR / f"amundi_{isin}.csv"
+
+    if xlsx_path.exists():
+        try:
+            df = pd.read_excel(xlsx_path)
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Amundi-Excel {xlsx_path}: {e}")
+        source_path = xlsx_path
+
+    elif csv_path.exists():
+        # CSV: Semikolon, Python-Engine, kaputte Zeilen überspringen
+        try:
+            try:
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",
+                    engine="python",
+                    on_bad_lines="skip",  # pandas >= 1.3
+                )
+            except TypeError:
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",
+                    engine="python",
+                    error_bad_lines=False,
+                    warn_bad_lines=True,
+                )
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Amundi-CSV {csv_path}: {e}")
+        source_path = csv_path
+    else:
+        raise FileNotFoundError(
+            f"Keine Datei für Amundi-ETF {isin} gefunden. "
+            f"Erwarte data/amundi_{isin}.xlsx oder data/amundi_{isin}.csv"
+        )
+
+    lower_map = {c.lower(): c for c in df.columns}
+
+    # Kandidaten für die Namensspalte
+    name_candidates = [
+        "name",
+        "titel",
+        "titelname",
+        "security name",
+        "position",
+        "bezeichnung",
+        "issuer",
+        "issuer name",
+    ]
+
+    # Kandidaten für Gewichts-Spalte (in % oder als Anteil)
+    weight_candidates = [
+        "gewichtung (%)",
+        "gewichtung%",
+        "gewichtung",
+        "gewicht (%)",
+        "gewicht",
+        "weight (%)",
+        "weight%",
+        "weight",
+        "portfolio weight",
+        "portfolio weight (%)",
+        "gewicht in %",
+    ]
+
+    # Länderspalte
+    country_candidates = [
+        "land",
+        "country",
+        "issuer country",
+        "domicile",
+        "domizilland",
+    ]
+
+    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
+    country_col = next((lower_map[k] for k in country_candidates if k in lower_map), None)
+
+    if name_col is None or weight_col is None:
+        raise ValueError(
+            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
+            f"Spalten: {list(df.columns)}"
+        )
+
+    cols = [name_col, weight_col]
+    if country_col is not None:
+        cols.append(country_col)
+
+    result = df[cols].copy()
+    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+
+    if country_col is not None:
+        result.rename(columns={country_col: "country"}, inplace=True)
+    else:
+        result["country"] = pd.NA
+
+    # Gewicht-Spalte bereinigen
+    cleaned = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+    )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+
+    # Heuristik:
+    # - Wenn max > 1.5 -> Prozentangaben (z.B. 5.43 = 5,43 % -> /100)
+    # - Wenn max <= 1.5 -> bereits normierte Anteile (z.B. 0.0546)
+    max_val = numeric.max(skipna=True)
+    if pd.notna(max_val) and max_val > 1.5:
+        numeric = numeric / 100.0
+
+    result["weight_pct"] = numeric
+    result = result.dropna(subset=["weight_pct"])
+
+    return result
+
+
+def compute_lookthrough(portfolio_df: pd.DataFrame):
+    """
+    Berechnet die Look-Through-Einzelaktien-Gewichte.
+    Gibt zwei DataFrames zurück:
+      - aggregated: je Aktie Gesamtgewicht im Portfolio
+      - detailed: Detailansicht mit ETF-Zuordnung
+    """
+    all_rows = []
+
+    for _, row in portfolio_df.iterrows():
+        provider = row["provider"]
+        isin = row["isin"]
+        etf_weight = row["weight_in_portfolio"]
+
+        try:
+            if provider == "ishares":
+                holdings = load_ishares_holdings_from_url(isin)
+            elif provider == "amundi":
+                holdings = load_amundi_local(isin)
+            elif provider == "invesco":
+                holdings = load_invesco_local(isin)
+            else:
+                st.warning(f"Unbekannter Provider: {provider} für {row['name']}")
+                continue
+        except Exception as e:
+            st.error(f"Fehler beim Laden der Holdings für {row['name']} ({isin}): {e}")
+            continue
+
+        h = holdings.copy()
+        h["lookthrough_weight"] = h["weight_pct"] * etf_weight
+        h["etf_name"] = row["name"]
+        all_rows.append(h)
+
+    if not all_rows:
+        return (
+            pd.DataFrame(columns=["name", "weight_in_portfolio"]),
+            pd.DataFrame(),
+        )
+
+    combined = pd.concat(all_rows, ignore_index=True)
+
+    # gleiche Aktiennamen zusammenfassen
+    grouped = combined.groupby("name", as_index=False)["lookthrough_weight"].sum()
+    grouped.rename(columns={"lookthrough_weight": "weight_in_portfolio"}, inplace=True)
+    grouped.sort_values("weight_in_portfolio", ascending=False, inplace=True)
+
+    return grouped, combined
+
+
+# --------------------------------------------------------------------------------------
+# Streamlit App
+# --------------------------------------------------------------------------------------
+
+def main():
+    st.set_page_config(page_title="ETF Look-Through", layout="wide")
+    st.title("ETF Look-Through Analyse – Aktien- & Länder-Exposure")
+
+    st.markdown(
+        """
+Diese Version lädt die Holdings **direkt** über die Links der Anbieter:
+
+- iShares-ETFs (z.B. WITS, RBOT, WHCS) über die offiziellen CSV-Links
+- Amundi & Invesco über lokale CSV-Dateien im Ordner `data/`
+
+Zusätzlich:
+- Aggregation nach **Ländern**
+- Karte mit Punkten pro Land:
+  - Größe & Farbe ∝ Gewicht
+  - Hover-Tooltip mit Gewicht in %
+"""
+    )
+
+    portfolio_path = Path("portfolio.json")
+    if not portfolio_path.exists():
+        st.error("`portfolio.json` nicht gefunden – bitte Datei im Projektordner anlegen.")
+        st.stop()
+
+    portfolio_df = load_portfolio(portfolio_path)
+
+    st.subheader("Dein ETF-Portfolio")
+    st.dataframe(
+        portfolio_df[["name", "isin", "value_eur", "weight_in_portfolio"]]
+        .assign(weight_pct=lambda df: (df["weight_in_portfolio"] * 100).round(2))
+        .rename(columns={"weight_pct": "Gewicht im Depot (%)"})
+    )
+
+    st.markdown("---")
+    st.subheader("Look-Through-Berechnung")
+
+    if st.button("Holdings laden & Look-Through berechnen"):
+        aggregated_df, detailed_df = compute_lookthrough(portfolio_df)
+
+        if aggregated_df.empty:
+            st.warning("Keine Holdings geladen – bitte Fehlermeldungen oben prüfen.")
+            st.stop()
+
+        col1, col2 = st.columns([2, 3])
+
+        with col1:
+            st.markdown("### Top-Einzelaktien im Gesamtportfolio")
+            st.dataframe(
+                aggregated_df.assign(
+                    weight_pct=lambda df: (df["weight_in_portfolio"] * 100).round(2)
+                )[["name", "weight_pct"]]
+                .rename(columns={"weight_pct": "Gewicht im Portfolio (%)"})
+                .head(50)
+            )
+
+        with col2:
+            st.markdown("### Chart: Top-20 Aktien (Gewicht im Portfolio)")
+            top20 = aggregated_df.head(20).copy()
+            top20["Gewicht (%)"] = (top20["weight_in_portfolio"] * 100).round(2)
+            st.bar_chart(
+                data=top20.set_index("name")["Gewicht (%)"]
+            )
+
+        st.markdown("---")
+        st.subheader("Detailansicht: welche Aktien stecken in welchem ETF?")
+
+        if not detailed_df.empty:
+            detailed_display = detailed_df.assign(
+                gewicht_im_etf_pct=lambda df: (df["weight_pct"] * 100).round(2),
+                beitrag_portfolio_pct=lambda df: (df["lookthrough_weight"] * 100).round(3),
+            )[["etf_name", "name", "gewicht_im_etf_pct", "beitrag_portfolio_pct", "country"]]
+
+            detailed_display = detailed_display.rename(
+                columns={
+                    "etf_name": "ETF",
+                    "name": "Aktie",
+                    "gewicht_im_etf_pct": "Gewicht im ETF (%)",
+                    "beitrag_portfolio_pct": "Beitrag zum Gesamtportfolio (%)",
+                    "country": "Land",
+                }
+            )
+
+            st.dataframe(detailed_display)
+
+        # ----------------------------------------------------------------------------------
+        # Länder-Statistik & Punktkarte
+        # ----------------------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Länder-Statistik (Look-Through)")
+
+        if "country" not in detailed_df.columns:
+            st.info("Keine Länderdaten vorhanden (Spalte 'country').")
+        else:
+            country_df = (
+                detailed_df.copy()
+                .assign(
+                    country=lambda df: df["country"].fillna("Unbekannt"),
+                )
+                .groupby("country", as_index=False)["lookthrough_weight"]
+                .sum()
+            )
+
+            country_df["weight_pct"] = (country_df["lookthrough_weight"] * 100).round(2)
+
+            st.markdown("### Gewicht nach Land")
+            st.dataframe(
+                country_df[["country", "weight_pct"]]
+                .rename(
+                    columns={
+                        "country": "Land",
+                        "weight_pct": "Gewicht im Portfolio (%)",
+                    }
+                )
+                .sort_values("Gewicht im Portfolio (%)", ascending=False)
+            )
+
+            # Karte vorbereiten: nur Länder mit bekannten Koordinaten
+            map_rows = []
+            for _, row in country_df.iterrows():
+                land = row["country"]
+                weight = float(row["weight_pct"])
+                coords = COUNTRY_COORDS.get(land)
+                if coords is None or weight <= 0:
+                    continue
+                lat, lon = coords
+                map_rows.append(
+                    {
+                        "Land": land,
+                        "lat": lat,
+                        "lon": lon,
+                        "Gewicht_im_Portfolio": weight,
+                    }
+                )
+
+            if map_rows:
+                map_df = pd.DataFrame(map_rows)
+                max_weight = map_df["Gewicht_im_Portfolio"].max()
+
+                # Skaliere Radius & Farbe nach Gewicht
+                def compute_radius(w):
+                    # Basis 3e5 m plus Skala
+                    if max_weight <= 0:
+                        return 300000
+                    return 300000 + (w / max_weight) * 2500000
+
+                def compute_color_r(w):
+                    # 50..255 je nach Gewicht
+                    if max_weight <= 0:
+                        return 150
+                    return int(50 + (w / max_weight) * 205)
+
+                map_df["radius"] = map_df["Gewicht_im_Portfolio"].apply(compute_radius)
+                map_df["color_r"] = map_df["Gewicht_im_Portfolio"].apply(compute_color_r)
+
+                layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=map_df,
+                    pickable=True,
+                    get_position="[lon, lat]",
+                    get_fill_color="[color_r, 0, 150, 180]",
+                    get_radius="radius",
+                )
+
+                view_state = pdk.ViewState(
+                    latitude=20,
+                    longitude=0,
+                    zoom=1.2,
+                )
+
+                tooltip = {
+                    "html": "<b>{Land}</b><br/>Gewicht: {Gewicht_im_Portfolio} %",
+                    "style": {
+                        "backgroundColor": "rgba(0, 0, 0, 0.7)",
+                        "color": "white",
+                    },
+                }
+
+                st.markdown("### Weltkarte: Ländergewichtung (Punkte nach Gewicht)")
+                st.pydeck_chart(
+                    pdk.Deck(
+                        layers=[layer],
+                        initial_view_state=view_state,
+                        tooltip=tooltip,
+                    )
+                )
+            else:
+                st.info("Keine Länder mit bekannten Koordinaten gefunden (COUNTRY_COORDS erweitern?).")
+
+        st.success("Berechnung abgeschlossen.")
+
+
+if __name__ == "__main__":
+    main()
