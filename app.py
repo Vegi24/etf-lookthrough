@@ -130,76 +130,45 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     return result
 
 
-def load_amundi_local(isin: str) -> pd.DataFrame:
+def load_invesco_local(isin: str) -> pd.DataFrame:
     """
-    Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
+    Liest Invesco-Holdings aus einer lokalen Datei im Ordner data/.
     Erlaubt:
-      - data/amundi_<ISIN>.xlsx  (Excel)
-      - data/amundi_<ISIN>.csv   (CSV)
-
-    Erwartet: irgendeine Spalte mit Name + eine mit Gewicht (%) o.ä.
+      - data/invesco_<ISIN>.xlsx  (Excel)
+      - data/invesco_<ISIN>.csv   (CSV)
     """
-    # mögliche Dateien
-    xlsx_path = DATA_DIR / f"amundi_{isin}.xlsx"
-    csv_path = DATA_DIR / f"amundi_{isin}.csv"
+    xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
+    csv_path = DATA_DIR / f"invesco_{isin}.csv"
 
     if xlsx_path.exists():
-        # Excel einlesen
         try:
             df = pd.read_excel(xlsx_path)
         except Exception as e:
-            raise RuntimeError(f"Fehler beim Lesen der Amundi-Excel {xlsx_path}: {e}")
+            raise RuntimeError(f"Fehler beim Lesen der Invesco-Excel {xlsx_path}: {e}")
         source_path = xlsx_path
     elif csv_path.exists():
         df = pd.read_csv(csv_path)
         source_path = csv_path
     else:
         raise FileNotFoundError(
-            f"Keine Datei für Amundi-ETF {isin} gefunden. "
-            f"Erwarte data/amundi_{isin}.xlsx oder data/amundi_{isin}.csv"
+            f"Keine Datei für Invesco-ETF {isin} gefunden. "
+            f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
         )
 
-    # Spaltennamen ins Lowercase mappen, damit wir robust suchen können
     lower_map = {c.lower(): c for c in df.columns}
 
-    # Kandidaten für die Namensspalte
     name_candidates = [
-        "name",
-        "titel",
-        "titelname",
-        "security name",
-        "position",
-        "bezeichnung",
-        "issuer",
-        "issuer name",
+        "name", "titel", "security name", "issuer name",
+        "position", "bezeichnung", "holding", "constituent"
     ]
-
-    # Kandidaten für Gewichts-Spalte (in %)
     weight_candidates = [
-        "gewichtung (%)",
-        "gewichtung%",
-        "gewichtung",
-        "gewicht (%)",
-        "gewicht",
-        "weight (%)",
-        "weight%",
-        "weight",
-        "portfolio weight",
-        "portfolio weight (%)",
-        "gewicht in %",
+        "weight (%)", "gewichtung (%)", "gewichtung",
+        "gewicht (%)", "gewicht", "portfolio weight",
+        "portfolio weight (%)", "gewicht in %"
     ]
 
-    name_col = None
-    for key in name_candidates:
-        if key in lower_map:
-            name_col = lower_map[key]
-            break
-
-    weight_col = None
-    for key in weight_candidates:
-        if key in lower_map:
-            weight_col = lower_map[key]
-            break
+    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
 
     if name_col is None or weight_col is None:
         raise ValueError(
@@ -210,7 +179,6 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
 
-    # Prozent-Spalte in Float 0–1 umwandeln
     result["weight_pct"] = (
         result["weight_pct"]
         .astype(str)
@@ -223,8 +191,8 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     )
 
     result = result.dropna(subset=["weight_pct"])
-
     return result
+
 
 
 def load_invesco_local(isin: str) -> pd.DataFrame:
