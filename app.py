@@ -132,38 +132,82 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
 def load_invesco_local(isin: str) -> pd.DataFrame:
     """
     Liest Invesco-Holdings aus einer lokalen Datei im Ordner data/.
+
     Erlaubt:
       - data/invesco_<ISIN>.xlsx  (Excel)
       - data/invesco_<ISIN>.csv   (CSV)
+
+    Unterstützt sowohl alte Prozent-Formate (z.B. "5,43" oder "5.43 %")
+    als auch das neue Format mit Anteilen (z.B. "0,051580471").
     """
     xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
     csv_path = DATA_DIR / f"invesco_{isin}.csv"
 
     if xlsx_path.exists():
+        # Excel einlesen
         try:
             df = pd.read_excel(xlsx_path)
         except Exception as e:
             raise RuntimeError(f"Fehler beim Lesen der Invesco-Excel {xlsx_path}: {e}")
         source_path = xlsx_path
+
     elif csv_path.exists():
-        df = pd.read_csv(csv_path)
+        # CSV: explizit Semikolon, Python-Engine, kaputte Zeilen überspringen
+        try:
+            try:
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",          # wichtig für dein Beispiel
+                    engine="python",
+                    on_bad_lines="skip",  # pandas >= 1.3
+                )
+            except TypeError:
+                # Fallback für ältere pandas-Versionen
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",
+                    engine="python",
+                    error_bad_lines=False,
+                    warn_bad_lines=True,
+                )
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Invesco-CSV {csv_path}: {e}")
         source_path = csv_path
+
     else:
         raise FileNotFoundError(
             f"Keine Datei für Invesco-ETF {isin} gefunden. "
             f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
         )
 
+    # Spaltennamen ins Lowercase mappen
     lower_map = {c.lower(): c for c in df.columns}
 
+    # Kandidaten für die Namensspalte – hier ist "full name" neu dazugekommen
     name_candidates = [
-        "name", "titel", "security name", "issuer name",
-        "position", "bezeichnung", "holding", "constituent"
+        "full name",
+        "name",
+        "titel",
+        "security name",
+        "issuer name",
+        "position",
+        "bezeichnung",
+        "holding",
+        "constituent",
     ]
+
+    # Kandidaten für Gewichts-Spalte (in % oder als Anteil)
     weight_candidates = [
-        "weight (%)", "gewichtung (%)", "gewichtung",
-        "gewicht (%)", "gewicht", "portfolio weight",
-        "portfolio weight (%)", "gewicht in %"
+        "weight",
+        "weight (%)",
+        "weight%",
+        "gewichtung (%)",
+        "gewichtung",
+        "gewicht (%)",
+        "gewicht",
+        "portfolio weight",
+        "portfolio weight (%)",
+        "gewicht in %",
     ]
 
     name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
@@ -178,19 +222,30 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
 
-    result["weight_pct"] = (
+    # Text bereinigen -> numerisch
+    cleaned = (
         result["weight_pct"]
         .astype(str)
         .str.replace("’", "", regex=False)
         .str.replace("'", "", regex=False)
-        .str.replace(",", ".", regex=False)
+        .str.replace(",", ".", regex=False)   # 0,05158 -> 0.05158
         .str.replace("%", "", regex=False)
         .str.strip()
-        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
     )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
 
+    # Heuristik:
+    # - Wenn max > 1.5 -> Prozentangaben (z.B. 5.43 = 5,43 % -> /100)
+    # - Wenn max <= 1.5 -> bereits normierte Anteile (z.B. 0.0515)
+    max_val = numeric.max(skipna=True)
+    if pd.notna(max_val) and max_val > 1.5:
+        numeric = numeric / 100.0
+
+    result["weight_pct"] = numeric
     result = result.dropna(subset=["weight_pct"])
+
     return result
+
 
 def load_amundi_local(isin: str) -> pd.DataFrame:
     """
