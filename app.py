@@ -11,7 +11,7 @@ DATA_DIR = Path("data")
 # --------------------------------------------------------------------------------------
 #  iShares: Holdings-CSV-Links (offizielle iShares-Downloads)
 #  Struktur wie in deinem WITS-Beispiel (erste 2 Zeilen Meta, dann CSV mit Header
-#  "Emittententicker,Name,Sektor,...,Gewichtung (%)" etc.). 
+#  "Emittententicker,Name,Sektor,...,Gewichtung (%)" etc.).
 # --------------------------------------------------------------------------------------
 ISHARES_HOLDINGS_URLS = {
     # iShares MSCI World Information Technology Sector Advanced UCITS ETF (WITS)
@@ -29,6 +29,25 @@ ISHARES_HOLDINGS_URLS = {
         "https://www.ishares.com/ch/privatkunden/de/produkte/308909/"
         "fund/1495092304805.ajax?dataType=fund&fileName=WHCS_holdings&fileType=csv"
     ),
+}
+
+# --------------------------------------------------------------------------------------
+# Länder-Koordinaten (Zentroid) für die Kartenansicht
+# --------------------------------------------------------------------------------------
+COUNTRY_COORDS = {
+    "USA": (37.1, -95.7),
+    "Vereinigte Staaten": (37.1, -95.7),
+    "Deutschland": (51.1657, 10.4515),
+    "Frankreich": (46.2276, 2.2137),
+    "Großbritannien": (55.3781, -3.4360),
+    "Vereinigtes Königreich": (55.3781, -3.4360),
+    "Österreich": (47.5162, 14.5501),
+    "Schweiz": (46.8182, 8.2275),
+    "Japan": (36.2048, 138.2529),
+    "Australien": (-25.2744, 133.7751),
+    "China": (35.8617, 104.1954),
+    "Italien": (41.8719, 12.5674),
+    "Schweden": (60.1282, 18.6435),
 }
 
 
@@ -80,8 +99,8 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     text = resp.text
     lines = text.splitlines()
 
-    # Header-Zeile finden (fängt mit "Emittententicker," an – siehe WITS CSV)
-    header_idx = None
+    # Header-Zeile finden (fängt mit "Emittententicker," oder "Ticker," an)
+    header_idx = None    # type: ignore[assignment]
     for i, line in enumerate(lines):
         if line.startswith("Emittententicker,") or line.startswith("Ticker,"):
             header_idx = i
@@ -103,7 +122,6 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     # Gewichtung
     weight_col = None
     weight_candidates = [
-        "Gewichtung (%)",
         "Gewichtung (%)",
         "Weight (%)",
         "Weighting (%)",
@@ -127,7 +145,11 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
     result["weight_pct"] = _clean_percent_series(result["weight_pct"])
     result = result.dropna(subset=["weight_pct"])
 
+    # iShares-Dateien enthalten hier kein Land – country bleibt NaN
+    result["country"] = pd.NA
+
     return result
+
 
 def load_invesco_local(isin: str) -> pd.DataFrame:
     """
@@ -137,14 +159,16 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
       - data/invesco_<ISIN>.xlsx  (Excel)
       - data/invesco_<ISIN>.csv   (CSV)
 
-    Unterstützt sowohl alte Prozent-Formate (z.B. "5,43" oder "5.43 %")
+    Unterstützt sowohl Prozent-Formate (z.B. "5,43" oder "5.43 %")
     als auch das neue Format mit Anteilen (z.B. "0,051580471").
+    Beispiel-CSV:
+      Full name;ISIN;Weight
+      CIPHER MINING INC ...;US17253J1060;0,051580471
     """
     xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
     csv_path = DATA_DIR / f"invesco_{isin}.csv"
 
     if xlsx_path.exists():
-        # Excel einlesen
         try:
             df = pd.read_excel(xlsx_path)
         except Exception as e:
@@ -157,7 +181,7 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
             try:
                 df = pd.read_csv(
                     csv_path,
-                    sep=";",          # wichtig für dein Beispiel
+                    sep=";",
                     engine="python",
                     on_bad_lines="skip",  # pandas >= 1.3
                 )
@@ -180,10 +204,9 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
             f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
         )
 
-    # Spaltennamen ins Lowercase mappen
     lower_map = {c.lower(): c for c in df.columns}
 
-    # Kandidaten für die Namensspalte – hier ist "full name" neu dazugekommen
+    # Kandidaten für die Namensspalte – "full name" neu mit drin
     name_candidates = [
         "full name",
         "name",
@@ -195,7 +218,6 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
         "holding",
         "constituent",
     ]
-
     # Kandidaten für Gewichts-Spalte (in % oder als Anteil)
     weight_candidates = [
         "weight",
@@ -221,6 +243,16 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
 
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+
+    # Country-Spalte (falls vorhanden)
+    country_col = next(
+        (lower_map[k] for k in ["land", "country", "domicile", "issuer country"] if k in lower_map),
+        None,
+    )
+    if country_col is not None:
+        result["country"] = df[country_col]
+    else:
+        result["country"] = pd.NA
 
     # Text bereinigen -> numerisch
     cleaned = (
@@ -250,18 +282,23 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
 def load_amundi_local(isin: str) -> pd.DataFrame:
     """
     Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
+
     Erlaubt:
       - data/amundi_<ISIN>.xlsx  (Excel)
       - data/amundi_<ISIN>.csv   (CSV)
 
     Unterstützt sowohl alte Prozent-Formate (z.B. "5,43" oder "5.43 %")
     als auch das neue Format mit Anteilen (z.B. "0,054629263").
+
+    Beispiel-Amundi-CSV (dein neues Format):
+      ISIN;Name;Anlageklasse;Währung;Gewichtung;Sektor;Land
+      US92338C1036;VERALTO CORP;EQUITY;USD;0,054629263;Industrie;USA
+      ...
     """
     xlsx_path = DATA_DIR / f"amundi_{isin}.xlsx"
     csv_path = DATA_DIR / f"amundi_{isin}.csv"
 
     if xlsx_path.exists():
-        # Excel einlesen
         try:
             df = pd.read_excel(xlsx_path)
         except Exception as e:
@@ -269,7 +306,7 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         source_path = xlsx_path
 
     elif csv_path.exists():
-        # CSV: explizit Semikolon, Python-Engine, kaputte Zeilen überspringen
+        # CSV: Semikolon, Python-Engine, kaputte Zeilen überspringen
         try:
             try:
                 df = pd.read_csv(
@@ -279,7 +316,6 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
                     on_bad_lines="skip",  # pandas >= 1.3
                 )
             except TypeError:
-                # Fallback für ältere pandas-Versionen
                 df = pd.read_csv(
                     csv_path,
                     sep=";",
@@ -290,14 +326,12 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         except Exception as e:
             raise RuntimeError(f"Fehler beim Lesen der Amundi-CSV {csv_path}: {e}")
         source_path = csv_path
-
     else:
         raise FileNotFoundError(
             f"Keine Datei für Amundi-ETF {isin} gefunden. "
             f"Erwarte data/amundi_{isin}.xlsx oder data/amundi_{isin}.csv"
         )
 
-    # Spaltennamen ins Lowercase mappen, damit wir robust suchen können
     lower_map = {c.lower(): c for c in df.columns}
 
     # Kandidaten für die Namensspalte
@@ -327,8 +361,18 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         "gewicht in %",
     ]
 
+    # Länderspalte
+    country_candidates = [
+        "land",
+        "country",
+        "issuer country",
+        "domicile",
+        "domizilland",
+    ]
+
     name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
     weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
+    country_col = next((lower_map[k] for k in country_candidates if k in lower_map), None)
 
     if name_col is None or weight_col is None:
         raise ValueError(
@@ -336,10 +380,19 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
             f"Spalten: {list(df.columns)}"
         )
 
-    result = df[[name_col, weight_col]].copy()
+    cols = [name_col, weight_col]
+    if country_col is not None:
+        cols.append(country_col)
+
+    result = df[cols].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
 
-    # Text bereinigen -> numerisch
+    if country_col is not None:
+        result.rename(columns={country_col: "country"}, inplace=True)
+    else:
+        result["country"] = pd.NA
+
+    # Gewicht-Spalte bereinigen
     cleaned = (
         result["weight_pct"]
         .astype(str)
@@ -362,8 +415,6 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     result = result.dropna(subset=["weight_pct"])
 
     return result
-
-
 
 
 def compute_lookthrough(portfolio_df: pd.DataFrame):
@@ -421,7 +472,7 @@ def compute_lookthrough(portfolio_df: pd.DataFrame):
 
 def main():
     st.set_page_config(page_title="ETF Look-Through", layout="wide")
-    st.title("ETF Look-Through Analyse – Einzelaktien-Exposure")
+    st.title("ETF Look-Through Analyse – Einzelaktien- & Länder-Exposure")
 
     st.markdown(
         """
@@ -429,6 +480,10 @@ Diese Version lädt die Holdings **direkt** über die Links der Anbieter:
 
 - iShares-ETFs (WITS, RBOT, WHCS) über die offiziellen CSV-Links
 - Amundi & Invesco über lokale CSV-Dateien im Ordner `data/`
+
+Zusätzlich:
+- Aggregation nach **Ländern**
+- Weltkarte mit der Verteilung nach Ländern (Look-Through-Gewicht)
 """
     )
 
@@ -495,6 +550,67 @@ Diese Version lädt die Holdings **direkt** über die Links der Anbieter:
             )
 
             st.dataframe(detailed_display)
+
+        # ----------------------------------------------------------------------------------
+        # Länder-Statistik & Karte
+        # ----------------------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Länder-Statistik (Look-Through)")
+
+        if "country" not in detailed_df.columns:
+            st.info("Keine Länderdaten vorhanden (Spalte 'country').")
+        else:
+            country_df = (
+                detailed_df.copy()
+                .assign(
+                    country=lambda df: df["country"].fillna("Unbekannt"),
+                )
+                .groupby("country", as_index=False)["lookthrough_weight"]
+                .sum()
+            )
+
+            country_df["weight_pct"] = (country_df["lookthrough_weight"] * 100).round(2)
+
+            st.markdown("### Gewicht nach Land")
+            st.dataframe(
+                country_df[["country", "weight_pct"]]
+                .rename(
+                    columns={
+                        "country": "Land",
+                        "weight_pct": "Gewicht im Portfolio (%)",
+                    }
+                )
+                .sort_values("Gewicht im Portfolio (%)", ascending=False)
+            )
+
+            # Karte vorbereiten
+            map_rows = []
+            for _, row in country_df.iterrows():
+                land = row["country"]
+                weight = row["weight_pct"]
+                coords = COUNTRY_COORDS.get(land)
+                if coords is None:
+                    continue
+                lat, lon = coords
+                map_rows.append(
+                    {
+                        "Land": land,
+                        "lat": lat,
+                        "lon": lon,
+                        "Gewicht im Portfolio (%)": weight,
+                    }
+                )
+
+            if map_rows:
+                map_df = pd.DataFrame(map_rows)
+                st.markdown("### Weltkarte: Ländergewichtung (Look-Through)")
+                st.map(
+                    map_df,
+                    latitude="lat",
+                    longitude="lon",
+                )
+            else:
+                st.info("Für keine Länder konnten Koordinaten gefunden werden (COUNTRY_COORDS erweitern?).")
 
         st.success("Berechnung abgeschlossen.")
 
