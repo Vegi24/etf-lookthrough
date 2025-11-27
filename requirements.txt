@@ -1,0 +1,3 @@
+streamlit>=1.38.0
+pandas>=2.0.0
+etf_scraper>=0.3.0
