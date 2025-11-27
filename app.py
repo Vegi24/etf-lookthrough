@@ -192,76 +192,9 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
     result = result.dropna(subset=["weight_pct"])
     return result
 
-
-def load_invesco_local(isin: str) -> pd.DataFrame:
-    """
-    Liest Invesco-Holdings aus einer lokalen Datei im Ordner data/.
-    Erlaubt:
-      - data/invesco_<ISIN>.xlsx  (Excel)
-      - data/invesco_<ISIN>.csv   (CSV)
-    """
-    xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
-    csv_path = DATA_DIR / f"invesco_{isin}.csv"
-
-    if xlsx_path.exists():
-        try:
-            df = pd.read_excel(xlsx_path)
-        except Exception as e:
-            raise RuntimeError(f"Fehler beim Lesen der Invesco-Excel {xlsx_path}: {e}")
-        source_path = xlsx_path
-    elif csv_path.exists():
-        df = pd.read_csv(csv_path)
-        source_path = csv_path
-    else:
-        raise FileNotFoundError(
-            f"Keine Datei für Invesco-ETF {isin} gefunden. "
-            f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
-        )
-
-    lower_map = {c.lower(): c for c in df.columns}
-
-    name_candidates = [
-        "name", "titel", "security name", "issuer name",
-        "position", "bezeichnung", "holding", "constituent"
-    ]
-    weight_candidates = [
-        "weight (%)", "gewichtung (%)", "gewichtung",
-        "gewicht (%)", "gewicht", "portfolio weight",
-        "portfolio weight (%)", "gewicht in %"
-    ]
-
-    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
-    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
-
-    if name_col is None or weight_col is None:
-        raise ValueError(
-            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
-            f"Spalten: {list(df.columns)}"
-        )
-
-    result = df[[name_col, weight_col]].copy()
-    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
-
-    result["weight_pct"] = (
-        result["weight_pct"]
-        .astype(str)
-        .str.replace("’", "", regex=False)
-        .str.replace("'", "", regex=False)
-        .str.replace(",", ".", regex=False)
-        .str.replace("%", "", regex=False)
-        .str.strip()
-        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
-    )
-
-    result = result.dropna(subset=["weight_pct"])
-    return result
-
-
-
 def load_amundi_local(isin: str) -> pd.DataFrame:
     """
     Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
-
     Erlaubt:
       - data/amundi_<ISIN>.xlsx  (Excel)
       - data/amundi_<ISIN>.csv   (CSV)
@@ -279,16 +212,30 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         except Exception as e:
             raise RuntimeError(f"Fehler beim Lesen der Amundi-Excel {xlsx_path}: {e}")
         source_path = xlsx_path
+
     elif csv_path.exists():
-        # CSV einlesen – zuerst normal, wenn nur 1 Spalte, dann als ';'-getrennt neu einlesen
+        # CSV: explizit Semikolon, Python-Engine, kaputte Zeilen überspringen
         try:
-            df = pd.read_csv(csv_path)
-            if df.shape[1] == 1:
-                # Wahrscheinlich Semikolon-getrennt (deutsches CSV)
-                df = pd.read_csv(csv_path, sep=";")
+            try:
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",
+                    engine="python",
+                    on_bad_lines="skip",  # pandas >= 1.3
+                )
+            except TypeError:
+                # Fallback für ältere pandas-Versionen
+                df = pd.read_csv(
+                    csv_path,
+                    sep=";",
+                    engine="python",
+                    error_bad_lines=False,
+                    warn_bad_lines=True,
+                )
         except Exception as e:
             raise RuntimeError(f"Fehler beim Lesen der Amundi-CSV {csv_path}: {e}")
         source_path = csv_path
+
     else:
         raise FileNotFoundError(
             f"Keine Datei für Amundi-ETF {isin} gefunden. "
@@ -311,7 +258,6 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     ]
 
     # Kandidaten für Gewichts-Spalte (in % oder als Anteil)
-    # z.B. "Gewichtung", "Gewichtung (%)", "Weight", ...
     weight_candidates = [
         "gewichtung (%)",
         "gewichtung%",
@@ -326,17 +272,8 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         "gewicht in %",
     ]
 
-    name_col = None
-    for key in name_candidates:
-        if key in lower_map:
-            name_col = lower_map[key]
-            break
-
-    weight_col = None
-    for key in weight_candidates:
-        if key in lower_map:
-            weight_col = lower_map[key]
-            break
+    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
 
     if name_col is None or weight_col is None:
         raise ValueError(
@@ -360,8 +297,8 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     numeric = pd.to_numeric(cleaned, errors="coerce")
 
     # Heuristik:
-    # - Wenn max > 1.5 -> wir interpretieren Werte als Prozentangaben (z.B. 5.43 = 5,43 %)
-    # - Wenn max <= 1.5 -> wir interpretieren Werte als bereits normierte Anteile (z.B. 0.0546)
+    # - Wenn max > 1.5 -> Prozentangaben (z.B. 5.43 = 5,43 % -> /100)
+    # - Wenn max <= 1.5 -> bereits normierte Anteile (z.B. 0.0546)
     max_val = numeric.max(skipna=True)
     if pd.notna(max_val) and max_val > 1.5:
         numeric = numeric / 100.0
@@ -370,6 +307,7 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
     result = result.dropna(subset=["weight_pct"])
 
     return result
+
 
 
 
