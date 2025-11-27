@@ -1,17 +1,40 @@
 import json
 from pathlib import Path
+from io import StringIO
 
 import pandas as pd
+import requests
 import streamlit as st
-from etf_scraper import ETFScraper  # für iShares & Invesco
-
 
 DATA_DIR = Path("data")
 
+# --------------------------------------------------------------------------------------
+#  iShares: Holdings-CSV-Links (offizielle iShares-Downloads)
+#  Struktur wie in deinem WITS-Beispiel (erste 2 Zeilen Meta, dann CSV mit Header
+#  "Emittententicker,Name,Sektor,...,Gewichtung (%)" etc.). 
+# --------------------------------------------------------------------------------------
+ISHARES_HOLDINGS_URLS = {
+    # iShares MSCI World Information Technology Sector Advanced UCITS ETF (WITS)
+    "IE00BJ5JNY98": (
+        "https://www.ishares.com/ch/privatkunden/de/produkte/308858/"
+        "fund/1495092304805.ajax?dataType=fund&fileName=WITS_holdings&fileType=csv"
+    ),
+    # iShares Automation & Robotics UCITS ETF (RBOT)
+    "IE00BYZK4552": (
+        "https://www.ishares.com/ch/privatkunden/de/produkte/284219/"
+        "fund/1495092304805.ajax?dataType=fund&fileName=RBOT_holdings&fileType=csv"
+    ),
+    # iShares MSCI World Health Care Sector Advanced UCITS ETF (WHCS)
+    "IE00BJ5JNZ06": (
+        "https://www.ishares.com/ch/privatkunden/de/produkte/308909/"
+        "fund/1495092304805.ajax?dataType=fund&fileName=WHCS_holdings&fileType=csv"
+    ),
+}
 
-# -------------------------
+
+# --------------------------------------------------------------------------------------
 # Hilfsfunktionen
-# -------------------------
+# --------------------------------------------------------------------------------------
 
 def load_portfolio(path: Path) -> pd.DataFrame:
     """Lädt dein Portfolio aus portfolio.json und berechnet ETF-Gewichte im Depot."""
@@ -23,42 +46,96 @@ def load_portfolio(path: Path) -> pd.DataFrame:
     return df
 
 
-def fetch_holdings_ishares_invesco(ticker: str, scraper: ETFScraper) -> pd.DataFrame:
+def _clean_percent_series(s: pd.Series) -> pd.Series:
     """
-    Nutzt etf_scraper, um die aktuellen Holdings für iShares/Invesco zu laden.
-    ticker: Börsenticker bei iShares/Invesco, z.B. WITS, BCHN, RBOT...
+    Nimmt eine Spalte mit Prozentwerten (z.B. '19.01', '3,45', '4’321,23')
+    und gibt einen Float in [0,1] zurück.
     """
-    df = scraper.query_holdings(ticker, holdings_date=None)
+    return (
+        s.astype(str)
+        .str.replace("’", "", regex=False)   # tausender-Trennzeichen wie 220’671
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.strip()
+        .pipe(lambda x: pd.to_numeric(x, errors="coerce")) / 100.0
+    )
 
-    # Spaltennamen vereinheitlichen
-    cols = [c.lower() for c in df.columns]
-    df.columns = cols
 
-    # Gewichtsspalte erkennen
-    if "weight" in df.columns:
-        weight_col = "weight"
-    elif "weight_percent" in df.columns:
-        weight_col = "weight_percent"
+def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
+    """
+    Lädt die Holdings direkt von der iShares-Seite über den CSV-Link.
+
+    Format wie in deiner WITS-Datei:
+      - Zeile 0: "Fondsposition per,..." (Meta)
+      - Zeile 1: Leerzeile
+      - Ab Zeile 2: CSV mit Header "Emittententicker,Name,...,Gewichtung (%)"
+    """
+    if isin not in ISHARES_HOLDINGS_URLS:
+        raise ValueError(f"Keine iShares-Holdings-URL für ISIN {isin} konfiguriert.")
+
+    url = ISHARES_HOLDINGS_URLS[isin]
+    resp = requests.get(url)
+    resp.raise_for_status()
+
+    text = resp.text
+    lines = text.splitlines()
+
+    # Header-Zeile finden (fängt mit "Emittententicker," an – siehe WITS CSV)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith("Emittententicker,") or line.startswith("Ticker,"):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError("Konnte Header-Zeile in iShares-CSV nicht finden.")
+
+    csv_text = "\n".join(lines[header_idx:])
+    df = pd.read_csv(StringIO(csv_text))
+
+    # Spalten identifizieren
+    # Name
+    if "Name" in df.columns:
+        name_col = "Name"
     else:
-        raise ValueError(f"Keine Gewichtsspalte in Holdings für {ticker} gefunden")
+        raise ValueError("Spalte 'Name' in iShares-CSV nicht gefunden.")
 
-    name_col = "name" if "name" in df.columns else "security_name"
+    # Gewichtung
+    weight_col = None
+    weight_candidates = [
+        "Gewichtung (%)",
+        "Gewichtung (%)",
+        "Weight (%)",
+        "Weighting (%)",
+        "Gewicht (%)",
+        "Gewicht %",
+    ]
+    for c in weight_candidates:
+        if c in df.columns:
+            weight_col = c
+            break
+
+    if weight_col is None:
+        raise ValueError(
+            f"Keine Gewichtsspalte in iShares-CSV gefunden. Spalten: {list(df.columns)}"
+        )
 
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
 
-    # Wenn Werte > 1.5, ist es wahrscheinlich in Prozent (0–100), sonst schon 0–1
-    if result["weight_pct"].max() > 1.5:
-        result["weight_pct"] = result["weight_pct"] / 100.0
+    # Prozentwerte in [0,1] umrechnen
+    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+    result = result.dropna(subset=["weight_pct"])
 
     return result
 
 
-def load_holdings_amundi(isin: str) -> pd.DataFrame:
+def load_amundi_local(isin: str) -> pd.DataFrame:
     """
-    Für Amundi: CSV-Datei aus Ordner data/amundi_<ISIN>.csv einlesen,
-    die du vorher von der Amundi-Website heruntergeladen hast.
-    Erwartet: Spalten für Name & Gewicht (%).
+    Liest Amundi-Holdings aus einer lokalen CSV im Ordner data/.
+    Erwarteter Pfad: data/amundi_<ISIN>.csv
+
+    CSV sollte irgendeine Spalte mit Name + Gewicht in % enthalten.
     """
     csv_path = DATA_DIR / f"amundi_{isin}.csv"
     if not csv_path.exists():
@@ -68,31 +145,117 @@ def load_holdings_amundi(isin: str) -> pd.DataFrame:
         )
 
     df = pd.read_csv(csv_path)
-    cols = [c.lower() for c in df.columns]
-    df.columns = cols
+    lower_map = {c.lower(): c for c in df.columns}
 
-    possible_name_cols = ["name", "titel", "titelname", "security", "title"]
-    possible_weight_cols = ["gewicht", "weight", "gewichtung", "gewicht_%", "weight_pct"]
+    name_candidates = [
+        "name",
+        "titel",
+        "titelname",
+        "security",
+        "bezeichnung",
+        "position",
+        "issuer",
+    ]
+    weight_candidates = [
+        "gewichtung (%)",
+        "gewichtung%",
+        "gewichtung",
+        "gewicht (%)",
+        "gewicht",
+        "weight (%)",
+        "weight%",
+        "weight",
+        "portfolio weight",
+    ]
 
-    name_col = next((c for c in possible_name_cols if c in df.columns), None)
-    weight_col = next((c for c in possible_weight_cols if c in df.columns), None)
+    name_col = None
+    for key in name_candidates:
+        if key in lower_map:
+            name_col = lower_map[key]
+            break
+
+    weight_col = None
+    for key in weight_candidates:
+        if key in lower_map:
+            weight_col = lower_map[key]
+            break
 
     if name_col is None or weight_col is None:
         raise ValueError(
             f"Konnte Name/Weight-Spalten in {csv_path} nicht erkennen. "
-            f"Bitte Spaltennamen prüfen."
+            f"Spalten: {list(df.columns)}"
         )
 
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
-
-    if result["weight_pct"].max() > 1.5:
-        result["weight_pct"] = result["weight_pct"] / 100.0
-
+    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+    result = result.dropna(subset=["weight_pct"])
     return result
 
 
-def compute_lookthrough(portfolio_df: pd.DataFrame, scraper: ETFScraper):
+def load_invesco_local(isin: str) -> pd.DataFrame:
+    """
+    Liest Invesco-Holdings aus einer lokalen CSV im Ordner data/.
+    Erwarteter Pfad: data/invesco_<ISIN>.csv
+
+    Du lädst dir die Holdings z.B. von der Invesco-Seite als CSV/Excel
+    und speicherst sie entsprechend ab. 
+    """
+    csv_path = DATA_DIR / f"invesco_{isin}.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Keine CSV für Invesco-ETF {isin} gefunden. "
+            f"Erwarte Datei: {csv_path}"
+        )
+
+    df = pd.read_csv(csv_path)
+    lower_map = {c.lower(): c for c in df.columns}
+
+    name_candidates = [
+        "name",
+        "titel",
+        "security name",
+        "issuer name",
+        "position",
+        "bezeichnung",
+    ]
+    weight_candidates = [
+        "gewichtung (%)",
+        "gewichtung",
+        "gewicht",
+        "gewicht %",
+        "weight (%)",
+        "weight",
+        "portfolio weight",
+        "gewicht in %",
+    ]
+
+    name_col = None
+    for key in name_candidates:
+        if key in lower_map:
+            name_col = lower_map[key]
+            break
+
+    weight_col = None
+    for key in weight_candidates:
+        if key in lower_map:
+            weight_col = lower_map[key]
+            break
+
+    if name_col is None or weight_col is None:
+        raise ValueError(
+            f"Konnte Name/Weight-Spalten in {csv_path} nicht erkennen. "
+            f"Spalten: {list(df.columns)}"
+        )
+
+    result = df[[name_col, weight_col]].copy()
+    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+    result = result.dropna(subset=["weight_pct"])
+    return result
+
+
+def compute_lookthrough(portfolio_df: pd.DataFrame):
     """
     Berechnet die Look-Through-Einzelaktien-Gewichte.
     Gibt zwei DataFrames zurück:
@@ -103,18 +266,16 @@ def compute_lookthrough(portfolio_df: pd.DataFrame, scraper: ETFScraper):
 
     for _, row in portfolio_df.iterrows():
         provider = row["provider"]
-        ticker = row["ticker"]
         isin = row["isin"]
         etf_weight = row["weight_in_portfolio"]
 
         try:
-            if provider in ["ishares", "invesco"]:
-                if not ticker:
-                    st.warning(f"Kein Ticker für {row['name']} angegeben – übersprungen.")
-                    continue
-                holdings = fetch_holdings_ishares_invesco(ticker, scraper)
+            if provider == "ishares":
+                holdings = load_ishares_holdings_from_url(isin)
             elif provider == "amundi":
-                holdings = load_holdings_amundi(isin)
+                holdings = load_amundi_local(isin)
+            elif provider == "invesco":
+                holdings = load_invesco_local(isin)
             else:
                 st.warning(f"Unbekannter Provider: {provider} für {row['name']}")
                 continue
@@ -122,11 +283,10 @@ def compute_lookthrough(portfolio_df: pd.DataFrame, scraper: ETFScraper):
             st.error(f"Fehler beim Laden der Holdings für {row['name']} ({isin}): {e}")
             continue
 
-        holdings = holdings.copy()
-        holdings["lookthrough_weight"] = holdings["weight_pct"] * etf_weight
-        holdings["etf_name"] = row["name"]
-
-        all_rows.append(holdings)
+        h = holdings.copy()
+        h["lookthrough_weight"] = h["weight_pct"] * etf_weight
+        h["etf_name"] = row["name"]
+        all_rows.append(h)
 
     if not all_rows:
         return (
@@ -144,9 +304,9 @@ def compute_lookthrough(portfolio_df: pd.DataFrame, scraper: ETFScraper):
     return grouped, combined
 
 
-# -------------------------
+# --------------------------------------------------------------------------------------
 # Streamlit App
-# -------------------------
+# --------------------------------------------------------------------------------------
 
 def main():
     st.set_page_config(page_title="ETF Look-Through", layout="wide")
@@ -154,11 +314,10 @@ def main():
 
     st.markdown(
         """
-Diese App liest dein ETF-Portfolio ein, lädt (wo möglich) die aktuellen Holdings 
-der ETFs und berechnet, welche **Einzelaktien** du effektiv hältst.
+Diese Version lädt die Holdings **direkt** über die Links der Anbieter:
 
-- iShares & Invesco: Holdings über `etf_scraper`
-- Amundi: Holdings aus CSV-Dateien im Ordner `data/`
+- iShares-ETFs (WITS, RBOT, WHCS) über die offiziellen CSV-Links
+- Amundi & Invesco über lokale CSV-Dateien im Ordner `data/`
 """
     )
 
@@ -180,9 +339,7 @@ der ETFs und berechnet, welche **Einzelaktien** du effektiv hältst.
     st.subheader("Look-Through-Berechnung")
 
     if st.button("Holdings laden & Look-Through berechnen"):
-        scraper = ETFScraper()
-
-        aggregated_df, detailed_df = compute_lookthrough(portfolio_df, scraper)
+        aggregated_df, detailed_df = compute_lookthrough(portfolio_df)
 
         if aggregated_df.empty:
             st.warning("Keine Holdings geladen – bitte Fehlermeldungen oben prüfen.")
