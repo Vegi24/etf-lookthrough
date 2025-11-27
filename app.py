@@ -257,41 +257,127 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
     return result
 
 
-
 def load_invesco_local(isin: str) -> pd.DataFrame:
     """
-    Liest Invesco-Holdings aus einer lokalen CSV im Ordner data/.
-    Erwarteter Pfad: data/invesco_<ISIN>.csv
-
-    Du lädst dir die Holdings z.B. von der Invesco-Seite als CSV/Excel
-    und speicherst sie entsprechend ab. 
+    Liest Invesco-Holdings aus einer lokalen Datei im Ordner data/.
+    Erlaubt:
+      - data/invesco_<ISIN>.xlsx  (Excel)
+      - data/invesco_<ISIN>.csv   (CSV)
     """
+    xlsx_path = DATA_DIR / f"invesco_{isin}.xlsx"
     csv_path = DATA_DIR / f"invesco_{isin}.csv"
-    if not csv_path.exists():
+
+    if xlsx_path.exists():
+        try:
+            df = pd.read_excel(xlsx_path)
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Invesco-Excel {xlsx_path}: {e}")
+        source_path = xlsx_path
+    elif csv_path.exists():
+        df = pd.read_csv(csv_path)
+        source_path = csv_path
+    else:
         raise FileNotFoundError(
-            f"Keine CSV für Invesco-ETF {isin} gefunden. "
-            f"Erwarte Datei: {csv_path}"
+            f"Keine Datei für Invesco-ETF {isin} gefunden. "
+            f"Erwarte data/invesco_{isin}.xlsx oder data/invesco_{isin}.csv"
         )
 
-    df = pd.read_csv(csv_path)
     lower_map = {c.lower(): c for c in df.columns}
 
     name_candidates = [
-        "name",
-        "titel",
-        "security name",
-        "issuer name",
-        "position",
-        "bezeichnung",
+        "name", "titel", "security name", "issuer name",
+        "position", "bezeichnung", "holding", "constituent"
     ]
     weight_candidates = [
+        "weight (%)", "gewichtung (%)", "gewichtung",
+        "gewicht (%)", "gewicht", "portfolio weight",
+        "portfolio weight (%)", "gewicht in %"
+    ]
+
+    name_col = next((lower_map[k] for k in name_candidates if k in lower_map), None)
+    weight_col = next((lower_map[k] for k in weight_candidates if k in lower_map), None)
+
+    if name_col is None or weight_col is None:
+        raise ValueError(
+            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
+            f"Spalten: {list(df.columns)}"
+        )
+
+    result = df[[name_col, weight_col]].copy()
+    result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
+
+    result["weight_pct"] = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
+    )
+
+    result = result.dropna(subset=["weight_pct"])
+    return result
+
+
+
+def load_amundi_local(isin: str) -> pd.DataFrame:
+    """
+    Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
+    Erlaubt:
+      - data/amundi_<ISIN>.xlsx  (Excel)
+      - data/amundi_<ISIN>.csv   (CSV)
+
+    Erwartet: irgendeine Spalte mit Name + eine mit Gewicht (%) o.ä.
+    """
+    # mögliche Dateien
+    xlsx_path = DATA_DIR / f"amundi_{isin}.xlsx"
+    csv_path = DATA_DIR / f"amundi_{isin}.csv"
+
+    if xlsx_path.exists():
+        # Excel einlesen
+        try:
+            df = pd.read_excel(xlsx_path)
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Amundi-Excel {xlsx_path}: {e}")
+        source_path = xlsx_path
+    elif csv_path.exists():
+        df = pd.read_csv(csv_path)
+        source_path = csv_path
+    else:
+        raise FileNotFoundError(
+            f"Keine Datei für Amundi-ETF {isin} gefunden. "
+            f"Erwarte data/amundi_{isin}.xlsx oder data/amundi_{isin}.csv"
+        )
+
+    # Spaltennamen ins Lowercase mappen, damit wir robust suchen können
+    lower_map = {c.lower(): c for c in df.columns}
+
+    # Kandidaten für die Namensspalte
+    name_candidates = [
+        "name",
+        "titel",
+        "titelname",
+        "security name",
+        "position",
+        "bezeichnung",
+        "issuer",
+        "issuer name",
+    ]
+
+    # Kandidaten für Gewichts-Spalte (in %)
+    weight_candidates = [
         "gewichtung (%)",
+        "gewichtung%",
         "gewichtung",
+        "gewicht (%)",
         "gewicht",
-        "gewicht %",
         "weight (%)",
+        "weight%",
         "weight",
         "portfolio weight",
+        "portfolio weight (%)",
         "gewicht in %",
     ]
 
@@ -309,15 +395,29 @@ def load_invesco_local(isin: str) -> pd.DataFrame:
 
     if name_col is None or weight_col is None:
         raise ValueError(
-            f"Konnte Name/Weight-Spalten in {csv_path} nicht erkennen. "
+            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
             f"Spalten: {list(df.columns)}"
         )
 
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
-    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+
+    # Prozent-Spalte in Float 0–1 umwandeln
+    result["weight_pct"] = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
+    )
+
     result = result.dropna(subset=["weight_pct"])
+
     return result
+
 
 
 def compute_lookthrough(portfolio_df: pd.DataFrame):
