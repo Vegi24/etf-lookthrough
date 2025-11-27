@@ -132,30 +132,49 @@ def load_ishares_holdings_from_url(isin: str) -> pd.DataFrame:
 
 def load_amundi_local(isin: str) -> pd.DataFrame:
     """
-    Liest Amundi-Holdings aus einer lokalen CSV im Ordner data/.
-    Erwarteter Pfad: data/amundi_<ISIN>.csv
+    Liest Amundi-Holdings aus einer lokalen Datei im Ordner data/.
+    Erlaubt:
+      - data/amundi_<ISIN>.xlsx  (Excel)
+      - data/amundi_<ISIN>.csv   (CSV)
 
-    CSV sollte irgendeine Spalte mit Name + Gewicht in % enthalten.
+    Erwartet: irgendeine Spalte mit Name + eine mit Gewicht (%) o.ä.
     """
+    # mögliche Dateien
+    xlsx_path = DATA_DIR / f"amundi_{isin}.xlsx"
     csv_path = DATA_DIR / f"amundi_{isin}.csv"
-    if not csv_path.exists():
+
+    if xlsx_path.exists():
+        # Excel einlesen
+        try:
+            df = pd.read_excel(xlsx_path)
+        except Exception as e:
+            raise RuntimeError(f"Fehler beim Lesen der Amundi-Excel {xlsx_path}: {e}")
+        source_path = xlsx_path
+    elif csv_path.exists():
+        df = pd.read_csv(csv_path)
+        source_path = csv_path
+    else:
         raise FileNotFoundError(
-            f"Keine CSV für Amundi-ETF {isin} gefunden. "
-            f"Erwarte Datei: {csv_path}"
+            f"Keine Datei für Amundi-ETF {isin} gefunden. "
+            f"Erwarte data/amundi_{isin}.xlsx oder data/amundi_{isin}.csv"
         )
 
-    df = pd.read_csv(csv_path)
+    # Spaltennamen ins Lowercase mappen, damit wir robust suchen können
     lower_map = {c.lower(): c for c in df.columns}
 
+    # Kandidaten für die Namensspalte
     name_candidates = [
         "name",
         "titel",
         "titelname",
-        "security",
-        "bezeichnung",
+        "security name",
         "position",
+        "bezeichnung",
         "issuer",
+        "issuer name",
     ]
+
+    # Kandidaten für Gewichts-Spalte (in %)
     weight_candidates = [
         "gewichtung (%)",
         "gewichtung%",
@@ -166,6 +185,8 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
         "weight%",
         "weight",
         "portfolio weight",
+        "portfolio weight (%)",
+        "gewicht in %",
     ]
 
     name_col = None
@@ -182,14 +203,27 @@ def load_amundi_local(isin: str) -> pd.DataFrame:
 
     if name_col is None or weight_col is None:
         raise ValueError(
-            f"Konnte Name/Weight-Spalten in {csv_path} nicht erkennen. "
+            f"Konnte Name/Weight-Spalten in {source_path} nicht erkennen. "
             f"Spalten: {list(df.columns)}"
         )
 
     result = df[[name_col, weight_col]].copy()
     result.rename(columns={name_col: "name", weight_col: "weight_pct"}, inplace=True)
-    result["weight_pct"] = _clean_percent_series(result["weight_pct"])
+
+    # Prozent-Spalte in Float 0–1 umwandeln
+    result["weight_pct"] = (
+        result["weight_pct"]
+        .astype(str)
+        .str.replace("’", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .pipe(lambda s: pd.to_numeric(s, errors="coerce") / 100.0)
+    )
+
     result = result.dropna(subset=["weight_pct"])
+
     return result
 
 
